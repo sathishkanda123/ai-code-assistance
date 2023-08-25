@@ -1,0 +1,23 @@
+import tensorflow as tf
+from flask import Flask, request
+
+# Create the deep learning model.
+model = tf.keras.models.load_model("model.h5")
+
+# Create the Flask app.
+app = Flask(__name__)
+
+# Route to receive the unoptimized code.
+@app.route("/", methods=["POST"])
+def receive_code():
+  # Get the unoptimized code from the request body.
+  unoptimized_code = request.json["code"]
+
+  # Generate the optimized code.
+  optimized_code = model.predict(unoptimized_code)
+
+  # Return the optimized code.
+  return jsonify({"optimized_code": optimized_code})
+
+# Run the Flask app.
+app.run()
