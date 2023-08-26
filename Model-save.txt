@@ -1,25 +1,118 @@
+import numpy as np
+import pandas as pd
 import tensorflow as tf
 
-# Define the deep learning model.
-model = tf.keras.models.Sequential([
-  tf.keras.layers.Dense(128, activation="relu"),
-  tf.keras.layers.Dense(64, activation="relu"),
-  tf.keras.layers.Dense(1, activation="sigmoid")
-])
+#Load data from CSV
+data = pd.read_csv("code_data.csv")
+original_code = data["original_code"].tolist()
+optimized_code = data["optimized_code"].tolist()
 
-# Compile the deep learning model.
-model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+# data = {
+#     "original_code": ["if (x > 0) { y = x; } else { y = -x; }"],
+#     "optimized_code": ["y = x > 0 ? x : -x;"]
+# }
+
+# Convert sample data to a DataFrame
+# df = pd.DataFrame(data)
+
+# original_code = df["original_code"]
+# optimized_code = df["optimized_code"]
+
+# Tokenization and preprocessing
+tokenizer = tf.keras.preprocessing.text.Tokenizer();
+tokenizer.fit_on_texts(original_code + optimized_code)
+vocab_size = len(tokenizer.word_index) + 1
+max_sequence_length = 1
+
+original_seq = tokenizer.texts_to_sequences(original_code)
+optimized_seq = tokenizer.texts_to_sequences(optimized_code)
+
+original_padded = tf.keras.utils.pad_sequences(original_seq, maxlen=max_sequence_length, padding='post')
+optimized_padded = tf.keras.utils.pad_sequences(optimized_seq, maxlen=max_sequence_length, padding='post')
+
+print("Shape of original_padded:", original_padded.shape)
+print("Shape of optimized_padded:", optimized_padded.shape)
+
+# Model architecture
+embedding_dim = 64
+hidden_units = 128
+
+encoder_input = tf.keras.layers.Input(shape=(max_sequence_length,))
+encoder_embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)(encoder_input)
+encoder_lstm = tf.keras.layers.LSTM(hidden_units, return_state=True)
+encoder_outputs, state_h, state_c = encoder_lstm(encoder_embedding)
+encoder_states = [state_h, state_c]
+
+print("Shape of encoder_outputs:", encoder_outputs.shape)
+print("Shape of encoder_states:", state_h.shape, state_c.shape)
 
 
-# Load the dataset of optimized and unoptimized code.
-dataset = tf.data.TextLineDataset("data.csv").map(tf.strings.bytes_split)
+decoder_input = tf.keras.layers.Input(shape=(max_sequence_length,))
+decoder_embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)(decoder_input)
+decoder_lstm = tf.keras.layers.LSTM(hidden_units, return_sequences=True, return_state=True)
+decoder_outputs, _, _ = decoder_lstm(decoder_embedding, initial_state=encoder_states)
+decoder_dense = tf.keras.layers.Dense(vocab_size, activation='softmax')
+output = decoder_dense(decoder_outputs)
 
-# Split the dataset into training and test sets.
-train_dataset, test_dataset = dataset.train_test_split(0.8)
+print("Shape of decoder_outputs:", decoder_outputs.shape)
 
-# Train the deep learning model.
-model.fit(train_dataset, epochs=10)
+model = tf.keras.Model([encoder_input, decoder_input], output)
+model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
-# Save the deep learning model to a file.
-model.save("model.h5")
+# Model training
+# encoder_input_data = original_padded
+# decoder_input_data = optimized_padded[:, :-1]
+# decoder_target_data = optimized_padded[:, 1:]
 
+encoder_input_data = original_padded
+decoder_input_data = optimized_padded[:, :-1]
+decoder_target_data = np.roll(decoder_input_data, -1, axis=1)  # Shift the decoder input for target data
+
+
+print("Shape of encoder_input_data:", encoder_input_data.shape)
+print("Shape of decoder_input_data:", decoder_input_data.shape)
+print("Shape of decoder_target_data:", decoder_target_data.shape)
+
+
+model.fit([encoder_input_data, decoder_input_data], decoder_target_data, batch_size=1, epochs=1)
+
+# Inference
+encoder_model = tf.keras.Model(encoder_input, encoder_states)
+
+decoder_state_input_h = tf.keras.layers.Input(shape=(hidden_units,))
+decoder_state_input_c = tf.keras.layers.Input(shape=(hidden_units,))
+decoder_states_inputs = [decoder_state_input_h, decoder_state_input_c]
+
+decoder_outputs, state_h, state_c = decoder_lstm(decoder_embedding, initial_state=decoder_states_inputs)
+decoder_states = [state_h, state_c]
+decoder_outputs = decoder_dense(decoder_outputs)
+
+decoder_model = tf.keras.Model([decoder_input] + decoder_states_inputs, [decoder_outputs] + decoder_states)
+
+def optimize_code(input_code):
+    input_seq = tokenizer.texts_to_sequences([input_code])
+    input_seq = tf.keras.utils.pad_sequences(input_seq, maxlen=max_sequence_length, padding='post')
+    states_value = encoder_model.predict(input_seq)
+
+    target_seq = tokenizer.texts_to_sequences(['<start>'])
+    target_seq = tf.keras.utils.pad_sequences(target_seq, maxlen=max_sequence_length, padding='post')
+
+    decoded_code = []
+    while True:
+        output_tokens, h, c = decoder_model.predict([target_seq] + states_value)
+        sampled_token_index = np.argmax(output_tokens[0, -1, :])
+        sampled_token = tokenizer.index_word[sampled_token_index]
+        if sampled_token == '<end>' or len(decoded_code) > max_sequence_length:
+            break
+        decoded_code.append(sampled_token)
+        target_seq = tf.keras.utils.pad_sequences([[sampled_token_index]], maxlen=max_sequence_length, padding='post')
+        states_value = [h, c]
+
+    optimized_code = ' '.join(decoded_code)
+    return optimized_code
+
+# Example usage
+input_code = "if (x > 0) { y = x; } else { y = -x; }"
+optimized_result = optimize_code(input_code)
+print("Original Code:", input_code)
+print("Optimized Code:", optimized_result)
